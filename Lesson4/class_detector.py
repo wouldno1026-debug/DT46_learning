@@ -84,15 +84,15 @@ class ThresholdTuner():
             cv2.imshow('Blue Mask', blue_mask)
 
             # 终端实时打印
-            print("\n" + "-"*80)
+            print("\\n" + "-"*80)
             print(f"[RED 红色] 段1: np.array([{r_h1_min:3d}, {r_s_min:3d}, {r_v_min:3d}]) ~ np.array([{r_h1_max:3d}, {r_s_max:3d}, {r_v_max:3d}])")
             print(f"[RED 红色] 段2: np.array([{r_h2_min:3d}, {r_s_min:3d}, {r_v_min:3d}]) ~ np.array([{r_h2_max:3d}, {r_s_max:3d}, {r_v_max:3d}])")
             print(f"[BLUE蓝色] 单段: np.array([{b_h_min:3d}, {b_s_min:3d}, {b_v_min:3d}]) ~ np.array([{b_h_max:3d}, {b_s_max:3d}, {b_v_max:3d}])")
-            print("\033[F" * 4, end="")
+            print("\\033[F" * 4, end="")
 
             if cv2.waitKey(1) & 0xFF in [ord('q'), 27]:
                 # 打印最终结果
-                print("\n\n" + "="*60)
+                print("\\n\\n" + "="*60)
                 print("✅ 最终调参结果（请直接复制替换）：")
                 print(f"lower_red0 = np.array([{r_h1_min}, {r_s_min}, {r_v_min}], dtype=np.uint8)")
                 print(f"upper_red0 = np.array([{r_h1_max}, {r_s_max}, {r_v_max}], dtype=np.uint8)")
@@ -109,7 +109,7 @@ class ThresholdTuner():
 # 数值存放
 class Config():
     # ---------- 图片路径 ----------
-    IMAGE_PATH = "photo.jpeg"
+    IMAGE_PATH = "photo.png"
 
     # ---------- 颜色分割阈值 ----------
 
@@ -131,6 +131,7 @@ class Config():
     ANGLE_THRESHOLD = 30
 
     # ---------- 装甲板配对参数 ----------
+
     PAIR_ANGLE_DIFF = 20.0
     PAIR_HEIGHT_DIFF = 1.5
     PAIR_LENGTH_DIFF = 0.3
@@ -143,6 +144,9 @@ class Config():
 class ColorSegmenter:
 
     def color_segmentation(self, photo):
+
+        if photo is None:
+            raise ValueError("photo 不能为 None")
 
         hsv = cv2.cvtColor(photo, cv2.COLOR_BGR2HSV)
 
@@ -240,12 +244,10 @@ class LightBarDetector:
             rect = cv2.minAreaRect(contour)
             (rect_x, rect_y), (rect_w, rect_h), z = rect
 
+            # 统一方向：确保 rw 为长边，rh 为短边
             if rect_w < rect_h:
                 rect_w, rect_h = rect_h, rect_w
                 z = float(z) + 90
-
-            # 使用调整后的参数重新构造矩形
-            rect = ((rect_x, rect_y), (rect_w, rect_h), z)
 
             coor = cv2.boxPoints(rect)
 
@@ -349,16 +351,11 @@ class ArmorMatcher:
                     zj = light_j['z']
 
                     # 1. 判断两根灯条的角度差
-                    angle_diff = abs(zi - zj) % 180
-                    angle_diff = min(angle_diff, 180 - angle_diff)
-
-                    if angle_diff > pair_angle_diff:
+                    if abs(zi - zj) > pair_angle_diff:
                         continue
 
                     # 2. 判断两根灯条的中心高度差
-                    avg_length = (rwi + rwj) / 2
-
-                    if abs(ryi - ryj) > pair_height_diff * avg_length:
+                    if abs(ryi - ryj) > pair_height_diff * (rhi + rhj):
                         continue
 
                     # 3. 判断两根灯条的长度差
@@ -370,8 +367,8 @@ class ArmorMatcher:
                         continue
 
                     # 5. 计算两根灯条中心之间的距离
-                    l_w = ((rxi - rxj) ** 2 + (ryi - ryj) ** 2) ** 0.5
-                    l_h = (rwi + rwj) / 2
+                    l_w = np.sqrt((rxi - rxj) ** 2 + (ryi - ryj) ** 2)
+                    l_h = (rwi + rwj) / 2.0
 
                     if l_h <= 0:
                         continue
@@ -382,15 +379,15 @@ class ArmorMatcher:
                     if ratio < armor_ratio_min or ratio > armor_ratio_max:
                         continue
 
-                    # 7. 确定左右灯条
-                    if rxi < rxj:
+                    # 7. 确定左右灯条（按中心点 x 排序）
+                    if rxi <= rxj:
                         left, right = light_i, light_j
                     else:
                         left, right = light_j, light_i
 
                     # 8. 计算装甲板中心
-                    cx = (rxi + rxj) / 2
-                    cy = (ryi + ryj) / 2
+                    cx = (left['rx'] + right['rx']) / 2.0
+                    cy = (left['ry'] + right['ry']) / 2.0
 
                     armor_list.append({
                         'color': color,
@@ -406,17 +403,25 @@ class ArmorMatcher:
 
 
     def deduplicate_armors(self, armor_list):
+        """
+        装甲板去重：当同一个灯条参与多个配对时，
+        只保留评分最高（面积最大）的那一组。
+        """
 
         if not armor_list:
             return []
 
-        # 优先保留面积较大的候选装甲板
-        armor_list.sort(key=lambda a: a['width'] * a['height'], reverse=True)
+        # 按评分（面积 = 宽 × 高）降序排序
+        sorted_armors = sorted(
+            armor_list,
+            key=lambda a: a['width'] * a['height'],
+            reverse=True
+        )
 
         used_lights = set()
         result = []
 
-        for armor in armor_list:
+        for armor in sorted_armors:
 
             left_id = id(armor['left'])
             right_id = id(armor['right'])
@@ -434,56 +439,37 @@ class ArmorMatcher:
 # 绘制图像
 class Visualizer:
 
-    def draw_results(self, photo, color_data, armors):
+    def draw_results(self, photo, armors):
 
-        result = photo.copy()
+        result_img = photo.copy()
 
-        # 1. 绘制筛选后的灯条
-        for color in ['red', 'blue']:
-
-            selected = color_data[color].get('selected', [])
-
-            for light in selected:
-
-                # 获取灯条的四个顶点
-                corners = np.int32(light['coo'])
-
-                # 根据灯条颜色选择绘制颜色
-                if color == 'red':
-                    draw_color = (0, 0, 255)
-                else:
-                    draw_color = (255, 0, 0)
-
-                # 绘制灯条矩形
-                cv2.drawContours(result, [corners], -1, draw_color, 2)
-
-                # 绘制灯条中心点
-                center = (int(light['rx']), int(light['ry']))
-
-                cv2.circle(result, center, 3, draw_color, -1)
-
-        # 2. 绘制装甲板
+        # 遍历配对成功的装甲板
         for armor in armors:
 
-            cx, cy = armor['center']
-            center = (int(cx), int(cy))
+            # 1. 拿到配对成功的左右灯条
+            left_light = armor['left']
+            right_light = armor['right']
 
-            # 绘制装甲板中心点
-            cv2.circle(result, center, 5, (0, 255, 0), -1)
+            # 2. 只画这两根配对成功的灯条框（绿框，线宽 4）
+            for light in [left_light, right_light]:
+                box = light['coo'].astype(np.int32)
+                cv2.drawContours(result_img, [box], -1, (0, 255, 0), 4)
 
-            # 显示装甲板中心坐标
-            text = f"({int(cx)}, {int(cy)})"
+            # 3. 装甲板中心点：红色灯条中间的红点 / 蓝色灯条中间的蓝点
+            if armor['color'] == 'red':
+                center_color = (0, 0, 255)
+            else:
+                center_color = (255, 0, 0)
 
-            cv2.putText(result,
-                text,
-                (int(cx) + 10, int(cy) - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 0),
-                2
-            )
+            cx, cy = int(armor['center'][0]), int(armor['center'][1])
+            cv2.circle(result_img, (cx, cy), 8, center_color, -1)
 
-        return result
+            # 4. 写上坐标文字
+            text = f"Armor: ({cx}, {cy})"
+            cv2.putText(result_img, text, (cx + 10, cy - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 3)
+
+        return result_img
 
 # 识别总流程
 class ArmorDetector:
@@ -503,14 +489,21 @@ class ArmorDetector:
         color_data = self.segmenter.color_segmentation(photo)
 
         # 2. 对红色和蓝色掩膜进行形态学处理
+        size = (3, 3)
 
         # 红色：开运算 -> 闭运算
-        color_data['red']['mask'] = self.processor.open_morphology(color_data['red']['mask'], (3, 3))
-        color_data['red']['mask'] = self.processor.close_morphology(color_data['red']['mask'], (3, 3))
+        red_mask_clean = self.processor.open_morphology(color_data['red']['mask'], size)
+        red_mask_clean = self.processor.close_morphology(red_mask_clean, size)
 
-        # 蓝色：开运算 -> 闭运算
-        color_data['blue']['mask'] = self.processor.open_morphology(color_data['blue']['mask'], (3, 3))
-        color_data['blue']['mask'] = self.processor.close_morphology(color_data['blue']['mask'], (3, 3))
+        # 蓝色：开运算 -> 闭运算 -> 膨胀 -> 闭运算
+        blue_mask_clean = self.processor.open_morphology(color_data['blue']['mask'], size)
+        blue_mask_clean = self.processor.close_morphology(blue_mask_clean, size)
+        blue_mask_clean = self.processor.dilate_morphology(blue_mask_clean, size)
+        blue_mask_clean = self.processor.close_morphology(blue_mask_clean, size)
+
+        # 把去噪后的掩膜写回字典，覆盖掉原来的 Raw 掩膜
+        color_data['red']['mask'] = red_mask_clean
+        color_data['blue']['mask'] = blue_mask_clean
 
         # 3. 提取轮廓
         color_data = self.light_detector.find_contours(color_data)
@@ -522,7 +515,7 @@ class ArmorDetector:
         armors = self.matcher.pair_lights(color_data)
 
         # 6. 绘制检测结果
-        result = self.visualizer.draw_results(photo, color_data, armors)
+        result = self.visualizer.draw_results(photo, armors)
 
         return color_data, armors, result
 
@@ -539,25 +532,34 @@ def main():
     photo = cv2.imread(Config.IMAGE_PATH)
 
     if photo is None:
-        raise ValueError("无法读取图片，请检查图片路径")
+        print("错误：读取不到图片！")
+        exit()
 
-    # 创建装甲板检测器
+    # 创建装甲板检测器并执行检测
     detector = ArmorDetector()
-
-    # 执行检测
     color_data, armors, result = detector.detect(photo)
 
     # 输出检测信息
-    print("红色灯条数量：", len(color_data['red']['selected']))
-    print("蓝色灯条数量：", len(color_data['blue']['selected']))
-    print("检测到的装甲板数量：", len(armors))
+    print(f"提取到红色轮廓: {len(color_data['red']['contours'])} 个")
+    print(f"提取到蓝色轮廓: {len(color_data['blue']['contours'])} 个")
+    print(f"筛选后剩余红色灯条: {len(color_data['red']['selected'])} 个")
+    print(f"筛选后剩余蓝色灯条: {len(color_data['blue']['selected'])} 个")
+    print(f"✅ 配对成功，找到 {len(armors)} 块装甲板！")
+    print("-" * 30)
+    print(f"红色检测结果: {color_data['red']['is_detected']} (像素数: {color_data['red']['pixel_count']})")
+    print(f"蓝色检测结果: {color_data['blue']['is_detected']} (像素数: {color_data['blue']['pixel_count']})")
+    print("-" * 30)
 
     # 显示检测结果
-    cv2.imshow("Detection Result", result)
+    cv2.imshow("Original Photo", photo)
+    cv2.imshow("Red Mask Clean", color_data['red']['mask'])
+    cv2.imshow("Blue Mask Clean", color_data['blue']['mask'])
+    cv2.imshow("Detected Result", result)
 
     # 保存检测结果
     cv2.imwrite("result_output.jpg", result)
 
+    print("按任意键关闭窗口...")
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
